@@ -1,49 +1,39 @@
-# 🚀 Token Bucket Rate Limiter Service
+# Go Rate Limiter
 
-A high-performance, lightweight rate limiting service built in Go using the token bucket algorithm. Perfect for API rate limiting, request throttling, and traffic control across distributed systems.
+A lightweight rate limiting service built in Go. Drop it in front of any API and it handles the throttling for you. No external dependencies, pure standard library.
 
-## ✨ Features
+Built on the **token bucket algorithm**: tokens refill continuously over time, so traffic is smoothed rather than hard-cutoff. Burst-friendly by design.
 
-- **Token Bucket Algorithm**: Smooth, predictable rate limiting with burst capacity
-- **High Performance**: Handles 10,000+ requests/second on modest hardware
-- **Zero Dependencies**: Pure Go implementation with standard library only
-- **Automatic Cleanup**: Memory-efficient with automatic bucket expiration
-- **CORS Enabled**: Ready for browser-based applications
-- **RESTful API**: Simple JSON-based interface
-- **Thread-Safe**: Concurrent request handling with sync.Map
+---
 
-## 📊 Performance
+## How it works
 
-- **Throughput**: 10,000-50,000 requests/second (depending on hardware)
-- **Latency**: Sub-millisecond response times
-- **Memory**: ~1-2 MB baseline + ~100 bytes per active rate limit key
-- **Concurrency**: Handles thousands of concurrent connections
+Every unique key (user ID, IP, API key, whatever you choose) gets its own bucket. Each request costs one token. Tokens refill at a constant rate based on your `limit` and `window` settings. If the bucket is empty, the request is rejected until tokens refill.
 
-## 🎯 How It Works
-
-The service uses a **token bucket algorithm**:
-1. Each unique key gets its own bucket with a specified capacity (limit)
-2. Tokens refill at a constant rate over the time window
-3. Each request consumes 1 token
-4. Requests are allowed if tokens are available, rejected otherwise
-5. Inactive buckets are automatically cleaned up after 10 minutes
-
-## 🚀 Quick Start
-
-### Running Locally
-
-```bash
-# Clone or download the service
-git clone https://github.com/var-raphael/Ratelimiter.git
-cd rate-limiter
-
-# Run the service
-go run main.go
-
-# The service starts on http://localhost:8080
+```
+limit=10, window=60  →  refill rate of 1 token every 6 seconds
 ```
 
-### Using Docker
+Inactive buckets (no activity for 10+ minutes) are cleaned up automatically so memory doesn't grow forever.
+
+---
+
+## Quickstart
+
+```bash
+git clone https://github.com/var-raphael/Ratelimiter.git
+cd Ratelimiter
+go run main.go
+# Listening on http://localhost:8080
+```
+
+To use a different port:
+
+```bash
+PORT=9000 go run main.go
+```
+
+### Docker
 
 ```dockerfile
 FROM golang:1.21-alpine AS builder
@@ -63,13 +53,15 @@ docker build -t rate-limiter .
 docker run -p 8080:8080 rate-limiter
 ```
 
-## 📡 API Reference
+---
 
-### Check Rate Limit
+## API
 
-**Endpoint**: `POST /check`
+### `POST /check`
 
-**Request Body**:
+Check whether a request should be allowed.
+
+**Request**
 ```json
 {
   "key": "user:123",
@@ -78,12 +70,13 @@ docker run -p 8080:8080 rate-limiter
 }
 ```
 
-**Parameters**:
-- `key` (string, required): Unique identifier for the rate limit (e.g., user ID, IP address, API key)
-- `limit` (int, required): Maximum number of requests allowed
-- `window` (int, required): Time window in seconds
+| Field | Type | Description |
+|-------|------|-------------|
+| `key` | string | Unique identifier: user ID, IP, API key, etc. |
+| `limit` | int | Max requests allowed in the window |
+| `window` | int | Time window in seconds |
 
-**Response** (200 OK):
+**Allowed (`200 OK`)**
 ```json
 {
   "allowed": true,
@@ -92,7 +85,7 @@ docker run -p 8080:8080 rate-limiter
 }
 ```
 
-**Response** (429 Too Many Requests):
+**Rate limited (`429 Too Many Requests`)**
 ```json
 {
   "allowed": false,
@@ -101,317 +94,152 @@ docker run -p 8080:8080 rate-limiter
 }
 ```
 
-### Health Check
+`reset_at` is a Unix timestamp for when the next token becomes available.
 
-**Endpoint**: `GET /health`
+---
 
-**Response**:
+### `GET /health`
+
 ```json
 {
   "status": "healthy",
-  "time": "2024-01-06T15:04:05Z"
+  "time": "2026-02-22T01:42:00Z"
 }
 ```
 
-## 💻 Usage Examples
+---
+
+## Usage examples
+
+### cURL
+```bash
+curl -X POST http://localhost:8080/check \
+  -H "Content-Type: application/json" \
+  -d '{"key": "user:dave", "limit": 10, "window": 60}'
+```
+
+### Node.js
+```javascript
+async function checkRateLimit(key, limit = 100, window = 60) {
+  const res = await fetch('http://localhost:8080/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, limit, window }),
+  });
+
+  const data = await res.json();
+
+  if (data.allowed) {
+    console.log(`Allowed. Remaining: ${data.remaining}`);
+    return true;
+  }
+
+  const retryIn = data.reset_at - Math.floor(Date.now() / 1000);
+  console.log(`Rate limited. Retry in ${retryIn}s`);
+  return false;
+}
+```
 
 ### Python
-
 ```python
 import requests
 import time
 
 def check_rate_limit(key, limit=100, window=60):
-    url = "http://localhost:8080/check"
-    payload = {
-        "key": key,
-        "limit": limit,
-        "window": window
-    }
-    
-    response = requests.post(url, json=payload)
-    data = response.json()
-    
-    if data["allowed"]:
-        print(f"Request allowed. Remaining: {data['remaining']}")
+    res = requests.post('http://localhost:8080/check', json={
+        'key': key, 'limit': limit, 'window': window
+    })
+    data = res.json()
+
+    if data['allowed']:
+        print(f"Allowed. Remaining: {data['remaining']}")
         return True
-    else:
-        wait_time = data["reset_at"] - int(time.time())
-        print(f"Rate limited. Retry in {wait_time} seconds")
-        return False
 
-# Example usage
-for i in range(5):
-    check_rate_limit("user:alice", limit=3, window=10)
-    time.sleep(1)
-```
-
-### Node.js
-
-```javascript
-const axios = require('axios');
-
-async function checkRateLimit(key, limit = 100, window = 60) {
-  try {
-    const response = await axios.post('http://localhost:8080/check', {
-      key: key,
-      limit: limit,
-      window: window
-    });
-    
-    const data = response.data;
-    
-    if (data.allowed) {
-      console.log(`Request allowed. Remaining: ${data.remaining}`);
-      return true;
-    }
-  } catch (error) {
-    if (error.response && error.response.status === 429) {
-      const data = error.response.data;
-      const waitTime = data.reset_at - Math.floor(Date.now() / 1000);
-      console.log(`Rate limited. Retry in ${waitTime} seconds`);
-    }
-    return false;
-  }
-}
-
-// Example usage
-(async () => {
-  for (let i = 0; i < 5; i++) {
-    await checkRateLimit('user:bob', 3, 10);
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-})();
+    retry_in = data['reset_at'] - int(time.time())
+    print(f"Rate limited. Retry in {retry_in}s")
+    return False
 ```
 
 ### PHP
-
 ```php
-<?php
-
 function checkRateLimit($key, $limit = 100, $window = 60) {
-    $url = "http://localhost:8080/check";
-    $data = json_encode([
-        "key" => $key,
-        "limit" => $limit,
-        "window" => $window
+    $payload = json_encode(['key' => $key, 'limit' => $limit, 'window' => $window]);
+
+    $ch = curl_init('http://localhost:8080/check');
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST  => 'POST',
+        CURLOPT_POSTFIELDS     => $payload,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
     ]);
-    
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json',
-        'Content-Length: ' . strlen($data)
-    ]);
-    
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    $result = json_decode(curl_exec($ch), true);
     curl_close($ch);
-    
-    $result = json_decode($response, true);
-    
+
     if ($result['allowed']) {
-        echo "Request allowed. Remaining: {$result['remaining']}\n";
+        echo "Allowed. Remaining: {$result['remaining']}\n";
         return true;
-    } else {
-        $waitTime = $result['reset_at'] - time();
-        echo "Rate limited. Retry in {$waitTime} seconds\n";
-        return false;
     }
-}
 
-// Example usage
-for ($i = 0; $i < 5; $i++) {
-    checkRateLimit("user:charlie", 3, 10);
-    sleep(1);
+    $retryIn = $result['reset_at'] - time();
+    echo "Rate limited. Retry in {$retryIn}s\n";
+    return false;
 }
 ```
-
-### cURL
-
-```bash
-# Check rate limit
-curl -X POST http://localhost:8080/check \
-  -H "Content-Type: application/json" \
-  -d '{
-    "key": "user:dave",
-    "limit": 10,
-    "window": 60
-  }'
-
-# Health check
-curl http://localhost:8080/health
-```
-
-### Go
-
-```go
-package main
-
-import (
-    "bytes"
-    "encoding/json"
-    "fmt"
-    "net/http"
-    "time"
-)
-
-type RateLimitRequest struct {
-    Key    string `json:"key"`
-    Limit  int    `json:"limit"`
-    Window int    `json:"window"`
-}
-
-type RateLimitResponse struct {
-    Allowed   bool   `json:"allowed"`
-    Remaining int    `json:"remaining"`
-    ResetAt   int64  `json:"reset_at"`
-}
-
-func checkRateLimit(key string, limit, window int) (bool, error) {
-    url := "http://localhost:8080/check"
-    
-    payload, _ := json.Marshal(RateLimitRequest{
-        Key:    key,
-        Limit:  limit,
-        Window: window,
-    })
-    
-    resp, err := http.Post(url, "application/json", bytes.NewBuffer(payload))
-    if err != nil {
-        return false, err
-    }
-    defer resp.Body.Close()
-    
-    var result RateLimitResponse
-    json.NewDecoder(resp.Body).Decode(&result)
-    
-    if result.Allowed {
-        fmt.Printf("Request allowed. Remaining: %d\n", result.Remaining)
-        return true, nil
-    } else {
-        waitTime := result.ResetAt - time.Now().Unix()
-        fmt.Printf("Rate limited. Retry in %d seconds\n", waitTime)
-        return false, nil
-    }
-}
-
-func main() {
-    for i := 0; i < 5; i++ {
-        checkRateLimit("user:eve", 3, 10)
-        time.Sleep(1 * time.Second)
-    }
-}
-```
-
-## 🎨 Common Use Cases
-
-### API Key Rate Limiting
-```json
-{
-  "key": "apikey:abc123",
-  "limit": 1000,
-  "window": 3600
-}
-```
-
-### IP-Based Throttling
-```json
-{
-  "key": "ip:192.168.1.1",
-  "limit": 100,
-  "window": 60
-}
-```
-
-### User-Specific Limits
-```json
-{
-  "key": "user:12345:endpoint:/api/search",
-  "limit": 10,
-  "window": 60
-}
-```
-
-### Tiered Rate Limits
-```python
-# Free tier: 100 req/hour
-check_rate_limit("user:123:free", limit=100, window=3600)
-
-# Premium tier: 10000 req/hour
-check_rate_limit("user:456:premium", limit=10000, window=3600)
-```
-
-## ⚙️ Configuration
-
-### Changing the Port
-
-Edit `main.go`:
-```go
-port := ":8080"  // Change to your preferred port
-```
-
-Or use environment variables:
-```go
-port := os.Getenv("PORT")
-if port == "" {
-    port = ":8080"
-}
-```
-
-### Adjusting Cleanup Interval
-
-Modify the cleanup ticker in `cleanup()`:
-```go
-ticker := time.NewTicker(5 * time.Minute)  // Adjust as needed
-```
-
-### Bucket Expiration Time
-
-Change the expiration threshold in `cleanup()`:
-```go
-if elapsed > 10*time.Minute {  // Adjust as needed
-    rl.buckets.Delete(key)
-}
-```
-
-## 🔒 Security Considerations
-
-- **Key Design**: Use unpredictable keys to prevent abuse (e.g., `hash(apikey)` instead of raw API keys)
-- **CORS**: Update CORS settings in production to whitelist specific origins
-- **HTTPS**: Deploy behind a reverse proxy (nginx, Caddy) with SSL/TLS
-- **Authentication**: Add API key validation before rate limit checks
-- **DDoS Protection**: Use this service behind a load balancer or CDN
-
-## 🐛 Error Handling
-
-The service returns appropriate HTTP status codes:
-- `200 OK`: Request allowed
-- `400 Bad Request`: Invalid parameters
-- `405 Method Not Allowed`: Wrong HTTP method
-- `429 Too Many Requests`: Rate limit exceeded
-
-## 📈 Monitoring
-
-Monitor your rate limiter with:
-
-```bash
-# Check health
-watch -n 1 curl -s http://localhost:8080/health
-
-# Load testing with Apache Bench
-ab -n 10000 -c 100 -p request.json -T application/json http://localhost:8080/check
-```
-
-## 🤝 Contributing
-
-Contributions are welcome! Feel free to submit issues or pull requests.
-
-## 📄 License
-
-MIT License - feel free to use in your projects!
 
 ---
 
+## Key design patterns
+
+The `key` field is how you define what gets rate limited. Some examples:
+
+```
+user:123                         →  per user
+ip:192.168.1.1                   →  per IP address
+apikey:abc123                    →  per API key
+user:123:endpoint:/api/search    →  per user per endpoint
+```
+
+For tiered limits, just use different keys:
+
+```
+user:123:free      limit=100,  window=3600   (free tier)
+user:123:pro       limit=5000, window=3600   (pro tier)
+```
+
+---
+
+## HTTP status codes
+
+| Code | Meaning |
+|------|---------|
+| `200` | Request allowed |
+| `400` | Missing or invalid parameters |
+| `405` | Wrong HTTP method |
+| `429` | Rate limit exceeded |
+
+---
+
+## Performance
+
+Tested on modest hardware:
+
+- **10,000–50,000 req/s** throughput
+- **Sub-millisecond** response times
+- **~100 bytes** memory per active key
+- Concurrent-safe via `sync.Map` and per-bucket mutexes
+
+---
+
+## Production notes
+
+- **CORS**: Currently set to `*`. Lock it down to specific origins before deploying.
+- **HTTPS**: Run behind nginx or Caddy with SSL. This service speaks plain HTTP.
+- **Key hashing**: Don't use raw API keys as the `key` field. Hash them first.
+- **DDoS**: Put this behind a load balancer or CDN. It rate limits at the app layer, not the network layer.
+
+---
+
+## License
+
+MIT. Use it however you want.

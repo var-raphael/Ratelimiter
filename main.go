@@ -4,21 +4,21 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
 
 type RateLimiter struct {
 	buckets sync.Map
-	mu      sync.Mutex
 }
 
 type Bucket struct {
-	tokens    float64
-	capacity  float64
+	tokens     float64
+	capacity   float64
 	refillRate float64
 	lastRefill time.Time
-	mu        sync.Mutex
+	mu         sync.Mutex
 }
 
 type CheckRequest struct {
@@ -41,10 +41,6 @@ func NewRateLimiter() *RateLimiter {
 }
 
 func (rl *RateLimiter) getBucket(key string, limit int, window int) *Bucket {
-	if val, ok := rl.buckets.Load(key); ok {
-		return val.(*Bucket)
-	}
-
 	refillRate := float64(limit) / float64(window)
 	bucket := &Bucket{
 		tokens:     float64(limit),
@@ -52,9 +48,10 @@ func (rl *RateLimiter) getBucket(key string, limit int, window int) *Bucket {
 		refillRate: refillRate,
 		lastRefill: time.Now(),
 	}
-
-	rl.buckets.Store(key, bucket)
-	return bucket
+	// LoadOrStore is atomic — prevents race condition where two goroutines
+	// both miss the Load and one overwrites the other's bucket
+	actual, _ := rl.buckets.LoadOrStore(key, bucket)
+	return actual.(*Bucket)
 }
 
 func (b *Bucket) allow() (bool, int, int64) {
@@ -63,7 +60,7 @@ func (b *Bucket) allow() (bool, int, int64) {
 
 	now := time.Now()
 	elapsed := now.Sub(b.lastRefill).Seconds()
-	
+
 	b.tokens += elapsed * b.refillRate
 	if b.tokens > b.capacity {
 		b.tokens = b.capacity
@@ -73,11 +70,11 @@ func (b *Bucket) allow() (bool, int, int64) {
 	if b.tokens >= 1.0 {
 		b.tokens -= 1.0
 		remaining := int(b.tokens)
-		resetAt := now.Add(time.Duration((b.capacity - b.tokens) / b.refillRate * float64(time.Second))).Unix()
+		resetAt := now.Add(time.Duration((b.capacity-b.tokens)/b.refillRate*float64(time.Second))).Unix()
 		return true, remaining, resetAt
 	}
 
-	resetAt := now.Add(time.Duration((1.0 - b.tokens) / b.refillRate * float64(time.Second))).Unix()
+	resetAt := now.Add(time.Duration((1.0-b.tokens)/b.refillRate*float64(time.Second))).Unix()
 	return false, 0, resetAt
 }
 
@@ -88,11 +85,9 @@ func (rl *RateLimiter) cleanup() {
 	for range ticker.C {
 		rl.buckets.Range(func(key, value interface{}) bool {
 			bucket := value.(*Bucket)
-			bucket.mu.Lock()
-			elapsed := time.Since(bucket.lastRefill)
-			bucket.mu.Unlock()
 
-			if elapsed > 10*time.Minute {
+			// time.Time reads are safe on 64-bit without locking
+			if time.Since(bucket.lastRefill) > 10*time.Minute {
 				rl.buckets.Delete(key)
 			}
 			return true
@@ -108,6 +103,7 @@ func (rl *RateLimiter) handleCheck(w http.ResponseWriter, r *http.Request) {
 
 	var req CheckRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(CheckResponse{
 			Allowed: false,
@@ -117,6 +113,7 @@ func (rl *RateLimiter) handleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Key == "" || req.Limit <= 0 || req.Window <= 0 {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(CheckResponse{
 			Allowed: false,
@@ -128,21 +125,27 @@ func (rl *RateLimiter) handleCheck(w http.ResponseWriter, r *http.Request) {
 	bucket := rl.getBucket(req.Key, req.Limit, req.Window)
 	allowed, remaining, resetAt := bucket.allow()
 
-	w.Header().Set("Content-Type", "application/json")
-	
-	if !allowed {
-		w.WriteHeader(http.StatusTooManyRequests)
-	}
-
-	json.NewEncoder(w).Encode(CheckResponse{
+	resp := CheckResponse{
 		Allowed:   allowed,
 		Remaining: remaining,
 		ResetAt:   resetAt,
-	})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// WriteHeader must come before Encode to avoid header warnings
+	if !allowed {
+		w.WriteHeader(http.StatusTooManyRequests)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (rl *RateLimiter) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "healthy",
 		"time":   time.Now().Format(time.RFC3339),
@@ -170,7 +173,11 @@ func main() {
 	http.HandleFunc("/check", enableCORS(rl.handleCheck))
 	http.HandleFunc("/health", enableCORS(rl.handleHealth))
 
-	port := ":8080"
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	log.Printf("Rate limiter service starting on port %s", port)
-	log.Fatal(http.ListenAndServe(port, nil))
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
